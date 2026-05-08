@@ -1,4 +1,4 @@
-const TARGET_BASE = "https://tignaltofan.fun:888";
+const TARGET_BASE = "https://panel.tradingltd.shop:443";
 
 const STRIP_HEADERS = new Set([
   "host",
