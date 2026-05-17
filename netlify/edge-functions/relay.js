@@ -1,4 +1,4 @@
-const TARGET_BASE = "https://panel.tradingltd.shop:443";
+const GITHUB_PAGE = "https://ir-netlify.github.io/NETLIFY/";
 
 const STRIP_HEADERS = new Set([
   "host",
@@ -16,23 +16,43 @@ const STRIP_HEADERS = new Set([
   "x-forwarded-port",
 ]);
 
-export default async function handler(request) {
-  if (!TARGET_BASE) {
-    return new Response("Misconfigured: TARGET_DOMAIN is not set", { status: 500 });
-  }
-
+export default async function handler(request, context) {
   try {
     const url = new URL(request.url);
-    const targetUrl = TARGET_BASE + url.pathname + url.search;
+    
+    let targetHost = request.headers.get("x-host");
+
+    if (url.pathname === "/" && !targetHost) {
+      const upgradeHeader = request.headers.get("upgrade") || "";
+      if (upgradeHeader.toLowerCase() !== "websocket") {
+        const githubResponse = await fetch(GITHUB_PAGE);
+        const githubContent = await githubResponse.text();
+        return new Response(githubContent, {
+          headers: { "content-type": "text/html; charset=UTF-8" },
+        });
+      }
+    }
+
+    if (!targetHost) {
+      return new Response("Error: x-host header is missing.", { status: 400 });
+    }
+
+    let targetUrl;
+    if (targetHost.startsWith('http://') || targetHost.startsWith('https://')) {
+      targetUrl = `${targetHost}${url.pathname}${url.search}`;
+    } else {
+      const isSecure = !targetHost.includes(':') || targetHost.includes(':443') || /^s\d+\./.test(targetHost);
+      const protocol = isSecure ? 'https://' : 'http://';
+      targetUrl = `${protocol}${targetHost}${url.pathname}${url.search}`;
+    }
 
     const headers = new Headers();
     let clientIp = null;
 
     for (const [key, value] of request.headers) {
       const k = key.toLowerCase();
-      if (STRIP_HEADERS.has(k)) continue;
-      if (k.startsWith("x-nf-")) continue;
-      if (k.startsWith("x-netlify-")) continue;
+      if (STRIP_HEADERS.has(k) || k.startsWith("x-nf-") || k.startsWith("x-netlify-") || k === "x-host") continue;
+      
       if (k === "x-real-ip") {
         clientIp = value;
         continue;
@@ -47,17 +67,12 @@ export default async function handler(request) {
     if (clientIp) headers.set("x-forwarded-for", clientIp);
 
     const method = request.method;
-    const hasBody = method !== "GET" && method !== "HEAD";
-
     const fetchOptions = {
       method,
       headers,
       redirect: "manual",
+      body: (method !== "GET" && method !== "HEAD") ? request.body : undefined,
     };
-
-    if (hasBody) {
-      fetchOptions.body = request.body;
-    }
 
     const upstream = await fetch(targetUrl, fetchOptions);
 
