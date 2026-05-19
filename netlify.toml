@@ -1,7 +1,7 @@
 [build]
-  command = "npm run build"
+  command = "echo 'Pure Edge Function'"
   publish = "public"
 
 [[edge_functions]]
-  function = "relay"
   path = "/*"
+  function = "relay"
