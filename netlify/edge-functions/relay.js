@@ -1,92 +1,88 @@
-const GITHUB_PAGE = "https://ir-netlify.github.io/NETLIFY/";
 
-const STRIP_HEADERS = new Set([
-  "host",
-  "connection",
-  "keep-alive",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
-  "forwarded",
-  "x-forwarded-host",
-  "x-forwarded-proto",
-  "x-forwarded-port",
-]);
+const FALLBACK_PAGE = "https://ir-netlify.github.io/NETLIFY/new/new.html";
 
-export default async function handler(request, context) {
+const BLOCKED_HEADERS = [
+  "host", "connection", "keep-alive", "proxy-authenticate",
+  "proxy-authorization", "te", "trailer", "transfer-encoding",
+  "upgrade", "forwarded", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port"
+];
+
+const constructDestUrl = (domain, path, query) => {
+  if (domain.startsWith('http://') || domain.startsWith('https://')) {
+    return `${domain}${path}${query}`;
+  }
+  const isHttps = !domain.includes(':') || domain.includes(':443') || /^s\d+\./.test(domain);
+  return `${isHttps ? 'https://' : 'http://'}${domain}${path}${query}`;
+};
+
+export default async (req, ctx) => {
   try {
-    const url = new URL(request.url);
-    
-    let targetHost = request.headers.get("x-host");
+    const parsedUrl = new URL(req.url);
+    const destHost = req.headers.get("x-host");
 
-    if (url.pathname === "/" && !targetHost) {
-      const upgradeHeader = request.headers.get("upgrade") || "";
-      if (upgradeHeader.toLowerCase() !== "websocket") {
-        const githubResponse = await fetch(GITHUB_PAGE);
-        const githubContent = await githubResponse.text();
-        return new Response(githubContent, {
+    // Handle root path fallback
+    if (parsedUrl.pathname === "/" && !destHost) {
+      const wsCheck = (req.headers.get("upgrade") || "").toLowerCase();
+      if (wsCheck !== "websocket") {
+        const fallbackRes = await fetch(FALLBACK_PAGE);
+        return new Response(await fallbackRes.text(), {
           headers: { "content-type": "text/html; charset=UTF-8" },
         });
       }
     }
 
-    if (!targetHost) {
-      return new Response("Error: x-host header is missing.", { status: 400 });
+    if (!destHost) {
+      return new Response("Invalid Request: Missing target host.", { status: 400 });
     }
 
-    let targetUrl;
-    if (targetHost.startsWith('http://') || targetHost.startsWith('https://')) {
-      targetUrl = `${targetHost}${url.pathname}${url.search}`;
-    } else {
-      const isSecure = !targetHost.includes(':') || targetHost.includes(':443') || /^s\d+\./.test(targetHost);
-      const protocol = isSecure ? 'https://' : 'http://';
-      targetUrl = `${protocol}${targetHost}${url.pathname}${url.search}`;
-    }
+    const finalUrl = constructDestUrl(destHost, parsedUrl.pathname, parsedUrl.search);
+    const proxyHeaders = new Headers();
+    let clientAddress = null;
 
-    const headers = new Headers();
-    let clientIp = null;
-
-    for (const [key, value] of request.headers) {
-      const k = key.toLowerCase();
-      if (STRIP_HEADERS.has(k) || k.startsWith("x-nf-") || k.startsWith("x-netlify-") || k === "x-host") continue;
+    req.headers.forEach((value, key) => {
+      const lowerKey = key.toLowerCase();
+      if (BLOCKED_HEADERS.includes(lowerKey) || lowerKey.startsWith("x-nf-") || lowerKey.startsWith("x-netlify-") || lowerKey === "x-host") {
+        return;
+      }
       
-      if (k === "x-real-ip") {
-        clientIp = value;
-        continue;
+      if (lowerKey === "x-real-ip") {
+        clientAddress = value;
+        return;
       }
-      if (k === "x-forwarded-for") {
-        if (!clientIp) clientIp = value;
-        continue;
+      if (lowerKey === "x-forwarded-for") {
+        if (!clientAddress) clientAddress = value;
+        return;
       }
-      headers.set(k, value);
+      proxyHeaders.set(lowerKey, value);
+    });
+
+    if (clientAddress) {
+      proxyHeaders.set("x-forwarded-for", clientAddress);
     }
 
-    if (clientIp) headers.set("x-forwarded-for", clientIp);
-
-    const method = request.method;
-    const fetchOptions = {
-      method,
-      headers,
+    const reqMethod = req.method;
+    const fetchConfig = {
+      method: reqMethod,
+      headers: proxyHeaders,
       redirect: "manual",
-      body: (method !== "GET" && method !== "HEAD") ? request.body : undefined,
+      body: (reqMethod === "GET" || reqMethod === "HEAD") ? undefined : req.body,
     };
 
-    const upstream = await fetch(targetUrl, fetchOptions);
-
+    const serverRes = await fetch(finalUrl, fetchConfig);
     const responseHeaders = new Headers();
-    for (const [key, value] of upstream.headers) {
-      if (key.toLowerCase() === "transfer-encoding") continue;
-      responseHeaders.set(key, value);
-    }
+    
+    serverRes.headers.forEach((value, key) => {
+      if (key.toLowerCase() !== "transfer-encoding") {
+        responseHeaders.set(key, value);
+      }
+    });
 
-    return new Response(upstream.body, {
-      status: upstream.status,
+    return new Response(serverRes.body, {
+      status: serverRes.status,
       headers: responseHeaders,
     });
-  } catch (error) {
-    return new Response("Bad Gateway: Relay Failed", { status: 502 });
+
+  } catch (err) {
+    return new Response("Gateway Error: Connection Failed", { status: 502 });
   }
-}
+};
